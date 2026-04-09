@@ -1,0 +1,139 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Fields:
+    //   - uid: string (required) - Firebase Auth UID
+    //   - name: string (required) - Full name
+    //   - email: string (required) - Email address
+    //   - role: string (required) - ['farmer', 'buyer', 'regulator']
+    //   - location: string (optional)
+    //   - createdAt: timestamp (required)
+    //
+    // Collection: products
+    // Fields:
+    //   - farmerId: string (required) - Owner UID
+    //   - farmerName: string (required)
+    //   - name: string (required) - Crop type
+    //   - quantity: number (required) - KG/Tonnes
+    //   - pricePerUnit: number (required) - ZMW
+    //   - status: string (required) - ['available', 'sold', 'delivered']
+    //   - location: string (required)
+    //   - imageUrl: string (optional)
+    //   - createdAt: timestamp (required)
+    //
+    // Collection: transactions
+    // Fields:
+    //   - productId: string (required)
+    //   - buyerId: string (required)
+    //   - farmerId: string (required)
+    //   - amount: number (required)
+    //   - status: string (required) - ['pending', 'paid', 'completed']
+    //   - deliveryStatus: string (optional) - ['processing', 'shipped', 'in-transit', 'delivered']
+    //   - timestamp: timestamp (required)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isDocOwner() {
+      return isAuthenticated() && request.auth.uid == resource.data.uid;
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidUser(data) {
+      return data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.email is string && isValidEmail(data.email) &&
+             data.role in ['farmer', 'buyer', 'regulator'] &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidProduct(data) {
+      return data.farmerId is string && data.farmerId == request.auth.uid &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.quantity is number && data.quantity > 0 &&
+             data.pricePerUnit is number && data.pricePerUnit > 0 &&
+             data.status in ['available', 'sold', 'delivered'] &&
+             data.location is string && data.location.size() > 0 &&
+             (!('imageUrl' in data) || (data.imageUrl is string && data.imageUrl.size() < 2000)) &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidTransaction(data) {
+      return data.productId is string &&
+             data.buyerId is string && data.buyerId == request.auth.uid &&
+             data.farmerId is string &&
+             data.amount is number && data.amount > 0 &&
+             data.status in ['pending', 'paid', 'completed'] &&
+             (!('deliveryStatus' in data) || data.deliveryStatus in ['processing', 'shipped', 'in-transit', 'delivered']) &&
+             data.timestamp is timestamp;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow create: if isOwner(userId) && isValidUser(request.resource.data);
+      allow update: if isOwner(userId) && isValidUser(request.resource.data) && 
+                      request.resource.data.role == resource.data.role; // Role is immutable for user
+    }
+
+    match /products/{productId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidProduct(request.resource.data);
+      allow update: if isAuthenticated() && (
+        // Owner can update everything except farmerId
+        (request.auth.uid == resource.data.farmerId && isValidProduct(request.resource.data)) ||
+        // Buyer can update status to 'sold' when creating a transaction (simulated)
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']) && 
+         request.resource.data.status == 'sold' && resource.data.status == 'available')
+      );
+      allow delete: if isAuthenticated() && request.auth.uid == resource.data.farmerId;
+    }
+
+    match /transactions/{transactionId} {
+      allow read: if isAuthenticated() && (request.auth.uid == resource.data.buyerId || request.auth.uid == resource.data.farmerId);
+      allow create: if isAuthenticated() && isValidTransaction(request.resource.data);
+      allow update: if isAuthenticated() && (
+        // Only involved parties can update status
+        (request.auth.uid == resource.data.buyerId || request.auth.uid == resource.data.farmerId) &&
+        (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']) &&
+          request.resource.data.status in ['paid', 'completed']
+        ) ||
+        // Farmer can update deliveryStatus
+        (
+          request.auth.uid == resource.data.farmerId &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deliveryStatus']) &&
+          request.resource.data.deliveryStatus in ['processing', 'shipped', 'in-transit', 'delivered']
+        )
+      );
+    }
+  }
+}

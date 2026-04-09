@@ -1,0 +1,66 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "A participant in the agricultural supply chain (Farmer, Buyer, or Regulator).",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID" },
+        "name": { "type": "string", "description": "Full name of the user" },
+        "email": { "type": "string", "format": "email" },
+        "role": { "type": "string", "enum": ["farmer", "buyer", "regulator"] },
+        "location": { "type": "string", "description": "Physical location or region" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "name", "email", "role"]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "Agricultural produce registered by a farmer.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "farmerId": { "type": "string", "description": "UID of the farmer" },
+        "farmerName": { "type": "string" },
+        "name": { "type": "string", "description": "Type of crop (e.g., Maize, Soybeans)" },
+        "quantity": { "type": "number", "description": "Quantity in KG or Tonnes" },
+        "pricePerUnit": { "type": "number", "description": "Price in ZMW" },
+        "status": { "type": "string", "enum": ["available", "sold", "delivered"] },
+        "location": { "type": "string" },
+        "imageUrl": { "type": "string", "format": "uri", "description": "URL of the product image" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["farmerId", "name", "quantity", "pricePerUnit", "status"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "A trade agreement or payment record.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "productId": { "type": "string" },
+        "buyerId": { "type": "string" },
+        "farmerId": { "type": "string" },
+        "amount": { "type": "number" },
+        "status": { "type": "string", "enum": ["pending", "paid", "completed"] },
+        "deliveryStatus": { "type": "string", "enum": ["processing", "shipped", "in-transit", "delivered"] },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["productId", "buyerId", "farmerId", "amount", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profile data"
+    },
+    "/products/{productId}": {
+      "schema": "Product",
+      "description": "Available agricultural products"
+    },
+    "/transactions/{transactionId}": {
+      "schema": "Transaction",
+      "description": "Trade and payment records"
+    }
+  }
+}
