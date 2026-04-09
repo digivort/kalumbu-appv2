@@ -1,43 +1,10 @@
 rules_version = '2';
+
+// The {database} wildcard matches 'kalumbu-db' automatically when 
+// these rules are deployed to that specific instance.
 service cloud.firestore {
   match /databases/{database}/documents {
-    // ===============================================================
-    // Assumed Data Model
-    // ===============================================================
-    //
-    // Collection: users
-    // Fields:
-    //   - uid: string (required) - Firebase Auth UID
-    //   - name: string (required) - Full name
-    //   - email: string (required) - Email address
-    //   - role: string (required) - ['farmer', 'buyer', 'regulator']
-    //   - location: string (optional)
-    //   - createdAt: timestamp (required)
-    //
-    // Collection: products
-    // Fields:
-    //   - farmerId: string (required) - Owner UID
-    //   - farmerName: string (required)
-    //   - name: string (required) - Crop type
-    //   - quantity: number (required) - KG/Tonnes
-    //   - pricePerUnit: number (required) - ZMW
-    //   - status: string (required) - ['available', 'sold', 'delivered']
-    //   - location: string (required)
-    //   - imageUrl: string (optional)
-    //   - createdAt: timestamp (required)
-    //
-    // Collection: transactions
-    // Fields:
-    //   - productId: string (required)
-    //   - buyerId: string (required)
-    //   - farmerId: string (required)
-    //   - amount: number (required)
-    //   - status: string (required) - ['pending', 'paid', 'completed']
-    //   - deliveryStatus: string (optional) - ['processing', 'shipped', 'in-transit', 'delivered']
-    //   - timestamp: timestamp (required)
-    //
-    // ===============================================================
-
+    
     // ===============================================================
     // Helper Functions
     // ===============================================================
@@ -45,94 +12,113 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function isOwner(userId) {
-      return isAuthenticated() && request.auth.uid == userId;
+    // Fetches the user profile to check roles
+    // Note: $(database) correctly references 'kalumbu-db' here
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
     }
 
-    function isDocOwner() {
-      return isAuthenticated() && request.auth.uid == resource.data.uid;
+    function hasRole(role) {
+      return isAuthenticated() && getUserData().role == role;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
     }
 
     function isValidEmail(email) {
       return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
     }
 
-    function hasOnlyAllowedFields(fields) {
-      return request.resource.data.keys().hasOnly(fields);
-    }
-
     // ===============================================================
-    // Domain Validators
+    // Domain Validators (Zambian Ag-Tech & ZRA Compliance)
     // ===============================================================
 
     function isValidUser(data) {
-      return data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+      return data.name is string && data.name.size() > 0 &&
              data.email is string && isValidEmail(data.email) &&
              data.role in ['farmer', 'buyer', 'regulator'] &&
+             data.verified is bool &&
              data.createdAt is timestamp;
     }
 
     function isValidProduct(data) {
       return data.farmerId is string && data.farmerId == request.auth.uid &&
-             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.farmerName is string &&
+             data.name is string && 
              data.quantity is number && data.quantity > 0 &&
              data.pricePerUnit is number && data.pricePerUnit > 0 &&
              data.status in ['available', 'sold', 'delivered'] &&
-             data.location is string && data.location.size() > 0 &&
-             (!('imageUrl' in data) || (data.imageUrl is string && data.imageUrl.size() < 2000)) &&
+             data.location is string &&
+             data.batchId is string && // Blockchain Traceability ID
              data.createdAt is timestamp;
     }
 
     function isValidTransaction(data) {
       return data.productId is string &&
+             data.productName is string &&
              data.buyerId is string && data.buyerId == request.auth.uid &&
+             data.buyerName is string &&
              data.farmerId is string &&
+             data.farmerName is string &&
              data.amount is number && data.amount > 0 &&
+             data.taxAmount is number && // ZRA Compliance Field (Kwacha)
              data.status in ['pending', 'paid', 'completed'] &&
-             (!('deliveryStatus' in data) || data.deliveryStatus in ['processing', 'shipped', 'in-transit', 'delivered']) &&
+             data.deliveryStatus in ['processing', 'shipped', 'in-transit', 'delivered'] &&
              data.timestamp is timestamp;
     }
 
     // ===============================================================
-    // Rules
+    // Collection Rules
     // ===============================================================
 
     match /users/{userId} {
       allow read: if isAuthenticated();
+      
+      // Allow profile creation during onboarding
       allow create: if isOwner(userId) && isValidUser(request.resource.data);
-      allow update: if isOwner(userId) && isValidUser(request.resource.data) && 
-                      request.resource.data.role == resource.data.role; // Role is immutable for user
+      
+      // Prevent users from changing their own role after creation to maintain integrity
+      allow update: if isOwner(userId) && 
+                    isValidUser(request.resource.data) && 
+                    request.resource.data.role == resource.data.role;
     }
 
     match /products/{productId} {
       allow read: if isAuthenticated();
-      allow create: if isAuthenticated() && isValidProduct(request.resource.data);
+      
+      // Only users with the 'farmer' role can list new products
+      allow create: if hasRole('farmer') && isValidProduct(request.resource.data);
+      
       allow update: if isAuthenticated() && (
-        // Owner can update everything except farmerId
+        // 1. The original farmer can update their own listing
         (request.auth.uid == resource.data.farmerId && isValidProduct(request.resource.data)) ||
-        // Buyer can update status to 'sold' when creating a transaction (simulated)
+        // 2. Atomic Purchase: A buyer can ONLY change the status from 'available' to 'sold'
         (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']) && 
          request.resource.data.status == 'sold' && resource.data.status == 'available')
       );
+      
       allow delete: if isAuthenticated() && request.auth.uid == resource.data.farmerId;
     }
 
     match /transactions/{transactionId} {
-      allow read: if isAuthenticated() && (request.auth.uid == resource.data.buyerId || request.auth.uid == resource.data.farmerId);
-      allow create: if isAuthenticated() && isValidTransaction(request.resource.data);
+      // Regulators see everything for compliance; Farmers/Buyers see their specific deals
+      allow read: if isAuthenticated() && (
+        hasRole('regulator') || 
+        request.auth.uid == resource.data.buyerId || 
+        request.auth.uid == resource.data.farmerId
+      );
+      
+      // Only buyers can initiate the transaction (purchase)
+      allow create: if hasRole('buyer') && isValidTransaction(request.resource.data);
+      
       allow update: if isAuthenticated() && (
-        // Only involved parties can update status
-        (request.auth.uid == resource.data.buyerId || request.auth.uid == resource.data.farmerId) &&
-        (
-          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']) &&
-          request.resource.data.status in ['paid', 'completed']
-        ) ||
-        // Farmer can update deliveryStatus
-        (
-          request.auth.uid == resource.data.farmerId &&
-          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deliveryStatus']) &&
-          request.resource.data.deliveryStatus in ['processing', 'shipped', 'in-transit', 'delivered']
-        )
+        // Allow status updates (e.g., confirming payment/receipt)
+        ((request.auth.uid == resource.data.buyerId || request.auth.uid == resource.data.farmerId) &&
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])) ||
+        // Farmers specifically update the delivery lifecycle
+        (request.auth.uid == resource.data.farmerId &&
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deliveryStatus']))
       );
     }
   }
