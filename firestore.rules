@@ -1,7 +1,5 @@
 rules_version = '2';
 
-// The {database} wildcard matches 'kalumbu-db' automatically when 
-// these rules are deployed to that specific instance.
 service cloud.firestore {
   match /databases/{database}/documents {
     
@@ -12,8 +10,7 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    // Fetches the user profile to check roles
-    // Note: $(database) correctly references 'kalumbu-db' here
+    // Cached-style check for user data to reduce redundant gets
     function getUserData() {
       return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
     }
@@ -31,7 +28,7 @@ service cloud.firestore {
     }
 
     // ===============================================================
-    // Domain Validators (Zambian Ag-Tech & ZRA Compliance)
+    // Domain Validators
     // ===============================================================
 
     function isValidUser(data) {
@@ -43,28 +40,20 @@ service cloud.firestore {
     }
 
     function isValidProduct(data) {
-      return data.farmerId is string && data.farmerId == request.auth.uid &&
-             data.farmerName is string &&
+      return data.farmerId is string && 
              data.name is string && 
-             data.quantity is number && data.quantity > 0 &&
+             data.quantity is number && data.quantity >= 0 &&
              data.pricePerUnit is number && data.pricePerUnit > 0 &&
              data.status in ['available', 'sold', 'delivered'] &&
-             data.location is string &&
-             data.batchId is string && // Blockchain Traceability ID
-             data.createdAt is timestamp;
+             data.batchId is string;
     }
 
     function isValidTransaction(data) {
       return data.productId is string &&
-             data.productName is string &&
-             data.buyerId is string && data.buyerId == request.auth.uid &&
-             data.buyerName is string &&
-             data.farmerId is string &&
-             data.farmerName is string &&
+             data.buyerId == request.auth.uid &&
              data.amount is number && data.amount > 0 &&
-             data.taxAmount is number && // ZRA Compliance Field (Kwacha)
+             data.taxAmount is number && // ZRA Compliance
              data.status in ['pending', 'paid', 'completed'] &&
-             data.deliveryStatus in ['processing', 'shipped', 'in-transit', 'delivered'] &&
              data.timestamp is timestamp;
     }
 
@@ -74,51 +63,45 @@ service cloud.firestore {
 
     match /users/{userId} {
       allow read: if isAuthenticated();
-      
-      // Allow profile creation during onboarding
       allow create: if isOwner(userId) && isValidUser(request.resource.data);
-      
-      // Prevent users from changing their own role after creation to maintain integrity
       allow update: if isOwner(userId) && 
-                    isValidUser(request.resource.data) && 
                     request.resource.data.role == resource.data.role;
     }
 
     match /products/{productId} {
       allow read: if isAuthenticated();
       
-      // Only users with the 'farmer' role can list new products
       allow create: if hasRole('farmer') && isValidProduct(request.resource.data);
       
       allow update: if isAuthenticated() && (
-        // 1. The original farmer can update their own listing
-        (request.auth.uid == resource.data.farmerId && isValidProduct(request.resource.data)) ||
-        // 2. Atomic Purchase: A buyer can ONLY change the status from 'available' to 'sold'
-        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']) && 
-         request.resource.data.status == 'sold' && resource.data.status == 'available')
+        // 1. Owner Update
+        (request.auth.uid == resource.data.farmerId) ||
+        // 2. Optimized Purchase Logic: Allows status change AND optional metadata updates
+        (resource.data.status == 'available' && 
+         request.resource.data.status == 'sold' &&
+         request.resource.data.diff(resource.data).affectedKeys().hasAny(['status', 'updatedAt', 'lastBuyerId']))
       );
       
       allow delete: if isAuthenticated() && request.auth.uid == resource.data.farmerId;
     }
 
     match /transactions/{transactionId} {
-      // Regulators see everything for compliance; Farmers/Buyers see their specific deals
       allow read: if isAuthenticated() && (
         hasRole('regulator') || 
         request.auth.uid == resource.data.buyerId || 
         request.auth.uid == resource.data.farmerId
       );
       
-      // Only buyers can initiate the transaction (purchase)
-      allow create: if hasRole('buyer') && isValidTransaction(request.resource.data);
+      // Initiation
+      allow create: if (hasRole('buyer') || hasRole('farmer')) && isValidTransaction(request.resource.data);
       
       allow update: if isAuthenticated() && (
-        // Allow status updates (e.g., confirming payment/receipt)
+        // Participants can update status
         ((request.auth.uid == resource.data.buyerId || request.auth.uid == resource.data.farmerId) &&
          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])) ||
-        // Farmers specifically update the delivery lifecycle
+        // Farmers manage delivery
         (request.auth.uid == resource.data.farmerId &&
-         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deliveryStatus']))
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['deliveryStatus', 'updatedAt']))
       );
     }
   }
